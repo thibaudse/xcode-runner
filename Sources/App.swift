@@ -24,20 +24,13 @@ struct XcodeRunnerApp: AsyncParsableCommand {
     @Flag(name: .shortAndLong, help: "Show detailed build output")
     var verbose: Bool = false
 
-    @Flag(
-        name: [.customLong("wait-for-debugger"), .customLong("debugger")],
-        help: "Launch app suspended and wait for a debugger to attach"
-    )
-    var waitForDebugger: Bool = false
-
     mutating func run() async throws {
         let app = XcodeRunner(
             projectPath: project,
             schemeName: scheme,
             deviceId: device,
             autoSelect: auto,
-            verbose: verbose,
-            waitForDebugger: waitForDebugger
+            verbose: verbose
         )
 
         try await app.run()
@@ -52,7 +45,6 @@ actor XcodeRunner {
     private let deviceId: String?
     private let autoSelect: Bool
     private let verbose: Bool
-    private let waitForDebugger: Bool
 
     private let deviceManager = DeviceManager.shared
     private let buildManager = BuildManager()
@@ -64,15 +56,13 @@ actor XcodeRunner {
         schemeName: String?,
         deviceId: String?,
         autoSelect: Bool,
-        verbose: Bool,
-        waitForDebugger: Bool
+        verbose: Bool
     ) {
         self.projectPath = projectPath
         self.schemeName = schemeName
         self.deviceId = deviceId
         self.autoSelect = autoSelect
         self.verbose = verbose
-        self.waitForDebugger = waitForDebugger
     }
 
     func run() async throws {
@@ -632,8 +622,6 @@ actor XcodeRunner {
             throw AppError.bundleIdNotFound
         }
 
-        let shouldWaitForDebugger = resolveWaitForDebugger()
-
         let progressHandler: (AppRunner.RunProgress) -> Void = { progress in
             print("   \(progress.icon) \(progress.message)")
         }
@@ -644,7 +632,6 @@ actor XcodeRunner {
                 device: device,
                 appPath: appPath,
                 bundleId: bundleId,
-                waitForDebugger: shouldWaitForDebugger,
                 progress: progressHandler
             )
         case .physical:
@@ -652,41 +639,8 @@ actor XcodeRunner {
                 device: device,
                 appPath: appPath,
                 bundleId: bundleId,
-                waitForDebugger: shouldWaitForDebugger,
                 progress: progressHandler
             )
-        }
-    }
-
-    private func resolveWaitForDebugger() -> Bool {
-        if waitForDebugger {
-            return true
-        }
-
-        return promptForDebuggerAttach()
-    }
-
-    private func promptForDebuggerAttach() -> Bool {
-        guard Terminal.isInteractive else { return false }
-
-        while true {
-            Terminal.write("   🐞 Attach debugger? ")
-            Terminal.write("[y/N]".dim)
-            Terminal.write(" ")
-            Terminal.flush()
-
-            guard let response = readLine() else { return false }
-            let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-
-            if trimmed.isEmpty || trimmed == "n" || trimmed == "no" {
-                return false
-            }
-
-            if trimmed == "y" || trimmed == "yes" {
-                return true
-            }
-
-            print("   Please enter y or n.".dim)
         }
     }
 

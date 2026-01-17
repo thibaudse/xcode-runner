@@ -193,6 +193,7 @@ actor BuildManager {
 
         // Find the built product
         var finalProductPath = snapshot.productPath
+
         if let path = finalProductPath {
             var isDir: ObjCBool = false
             if !FileManager.default.fileExists(atPath: path, isDirectory: &isDir) || !isDir.boolValue {
