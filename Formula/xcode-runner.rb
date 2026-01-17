@@ -1,10 +1,10 @@
 class XcodeRunner < Formula
   desc "Build and run Xcode projects from the terminal"
   homepage "https://github.com/thibaudse/xcode-runner"
-  url "https://github.com/thibaudse/xcode-runner/releases/download/build-3/xcode-runner-1.0.0-macos.tar.gz"
-  sha256 "edafae78c24ba7d5565b6e7241a54067347998d8f2f17b4c06a76e1715240323"
+  url "https://github.com/thibaudse/xcode-runner/releases/download/build-4/xcode-runner-1.0.0-macos.tar.gz"
+  sha256 "fc2e4052591a556aecf6a4c82c128a9d5340e6a98e84657e33cb9720b88b5b41"
   version "1.0.0"
-  revision 3
+  revision 4
   head "https://github.com/thibaudse/xcode-runner.git", branch: "main"
 
   depends_on :macos
