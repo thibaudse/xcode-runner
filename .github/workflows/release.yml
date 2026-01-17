@@ -69,6 +69,7 @@ jobs:
             sha256 "${SHA256}"
             version "${VERSION}"
             revision ${RUN_NUMBER}
+            head "https://github.com/${REPO}.git", branch: "main"
 
             depends_on :macos
 

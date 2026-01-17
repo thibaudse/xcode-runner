@@ -5,6 +5,7 @@ class XcodeRunner < Formula
   sha256 "edafae78c24ba7d5565b6e7241a54067347998d8f2f17b4c06a76e1715240323"
   version "1.0.0"
   revision 3
+  head "https://github.com/thibaudse/xcode-runner.git", branch: "main"
 
   depends_on :macos
 
