@@ -23,13 +23,19 @@ Build and run Xcode projects from the terminal with a fast, interactive TUI.
 brew install --formula https://raw.githubusercontent.com/thibaudse/xcode-runner/main/Formula/xcode-runner.rb
 ```
 
-This installs from the `main` branch and builds from source.
+This installs the latest release binary.
 
 ### Homebrew (tap)
 
 ```bash
 brew tap thibaudse/xcode-runner https://github.com/thibaudse/xcode-runner
 brew install xcode-runner
+```
+
+To install the latest commit from `main` instead:
+
+```bash
+brew install --HEAD thibaudse/xcode-runner/xcode-runner
 ```
 
 ### From source

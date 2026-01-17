@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   release:
+    if: github.actor != 'github-actions[bot]'
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -49,3 +50,44 @@ jobs:
           name: "Build ${{ github.run_number }}"
           generate_release_notes: true
           files: ${{ steps.package.outputs.archive }}
+
+      - name: Update Homebrew formula
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RUN_NUMBER: ${{ github.run_number }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          REPO: ${{ github.repository }}
+        run: |
+          SHA256=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+          URL="https://github.com/${REPO}/releases/download/build-${RUN_NUMBER}/${ARCHIVE}"
+
+          cat > Formula/xcode-runner.rb <<EOF
+          class XcodeRunner < Formula
+            desc "Build and run Xcode projects from the terminal"
+            homepage "https://github.com/${REPO}"
+            url "${URL}"
+            sha256 "${SHA256}"
+            version "${VERSION}"
+            revision ${RUN_NUMBER}
+
+            depends_on :macos
+
+            def install
+              bin.install "xcode-runner"
+            end
+
+            test do
+              output = shell_output("#{bin}/xcode-runner --version")
+              assert_match "${VERSION}", output
+            end
+          end
+          EOF
+
+          if git diff --quiet; then
+            echo "No formula changes."
+            exit 0
+          fi
+
+          git add Formula/xcode-runner.rb
+          git -c user.name="github-actions[bot]" -c user.email="github-actions[bot]@users.noreply.github.com" commit -m "Update Homebrew formula for build ${RUN_NUMBER}"
+          git push
