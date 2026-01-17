@@ -32,6 +32,7 @@ actor AppRunner {
             case copying
             case verifying
             case launching
+            case waitingForDebugger
             case running
             case failed
         }
@@ -46,6 +47,7 @@ actor AppRunner {
             case .copying: return "📋"
             case .verifying: return "✓"
             case .launching: return "🚀"
+            case .waitingForDebugger: return "🐞"
             case .running: return "▶️"
             case .failed: return "❌"
             }
@@ -58,6 +60,7 @@ actor AppRunner {
         device: Device,
         appPath: String,
         bundleId: String,
+        waitForDebugger: Bool,
         progress: @escaping (RunProgress) -> Void
     ) async throws {
         // Boot simulator if needed
@@ -71,10 +74,17 @@ actor AppRunner {
         try await installOnSimulator(deviceId: device.id, appPath: appPath)
 
         // Launch app
-        progress(RunProgress(phase: .launching, message: "Launching app..."))
-        try await launchOnSimulator(deviceId: device.id, bundleId: bundleId)
+        let launchMessage = waitForDebugger
+            ? "Launching app (waiting for debugger)..."
+            : "Launching app..."
+        progress(RunProgress(phase: .launching, message: launchMessage))
+        try await launchOnSimulator(deviceId: device.id, bundleId: bundleId, waitForDebugger: waitForDebugger)
 
-        progress(RunProgress(phase: .running, message: "App is running on \(device.name)"))
+        if waitForDebugger {
+            progress(RunProgress(phase: .waitingForDebugger, message: "App is waiting for debugger on \(device.name)"))
+        } else {
+            progress(RunProgress(phase: .running, message: "App is running on \(device.name)"))
+        }
     }
 
     private func bootSimulator(deviceId: String) async throws {
@@ -122,10 +132,20 @@ actor AppRunner {
         }
     }
 
-    private func launchOnSimulator(deviceId: String, bundleId: String) async throws {
+    private func launchOnSimulator(
+        deviceId: String,
+        bundleId: String,
+        waitForDebugger: Bool
+    ) async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["simctl", "launch", deviceId, bundleId]
+        var arguments = ["simctl", "launch"]
+        if waitForDebugger {
+            arguments.append("--wait-for-debugger")
+        }
+        arguments.append(deviceId)
+        arguments.append(bundleId)
+        process.arguments = arguments
 
         let errorPipe = Pipe()
         process.standardOutput = FileHandle.nullDevice
@@ -147,6 +167,7 @@ actor AppRunner {
         device: Device,
         appPath: String,
         bundleId: String,
+        waitForDebugger: Bool,
         progress: @escaping (RunProgress) -> Void
     ) async throws {
         // Check device connectivity first
@@ -157,10 +178,22 @@ actor AppRunner {
         try await installOnPhysicalDevice(deviceId: device.id, appPath: appPath, progress: progress)
 
         // Launch using devicectl
-        progress(RunProgress(phase: .launching, message: "Launching app..."))
-        try await launchOnPhysicalDevice(deviceId: device.id, bundleId: bundleId, progress: progress)
+        let launchMessage = waitForDebugger
+            ? "Launching app (waiting for debugger)..."
+            : "Launching app..."
+        progress(RunProgress(phase: .launching, message: launchMessage))
+        try await launchOnPhysicalDevice(
+            deviceId: device.id,
+            bundleId: bundleId,
+            waitForDebugger: waitForDebugger,
+            progress: progress
+        )
 
-        progress(RunProgress(phase: .running, message: "App is running on \(device.name)"))
+        if waitForDebugger {
+            progress(RunProgress(phase: .waitingForDebugger, message: "App is waiting for debugger on \(device.name)"))
+        } else {
+            progress(RunProgress(phase: .running, message: "App is running on \(device.name)"))
+        }
     }
 
     private func installOnPhysicalDevice(
@@ -218,11 +251,17 @@ actor AppRunner {
     private func launchOnPhysicalDevice(
         deviceId: String,
         bundleId: String,
+        waitForDebugger: Bool,
         progress: @escaping (RunProgress) -> Void
     ) async throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["devicectl", "device", "process", "launch", "--device", deviceId, bundleId]
+        var arguments = ["devicectl", "device", "process", "launch", "--device", deviceId]
+        if waitForDebugger {
+            arguments.append("--start-stopped")
+        }
+        arguments.append(bundleId)
+        process.arguments = arguments
 
         let outputPipe = Pipe()
         let errorPipe = Pipe()

@@ -9,6 +9,10 @@ struct BuildProgress {
 
     enum Phase: String {
         case preparing = "Preparing"
+        case resolvingPackages = "Resolving Packages"
+        case fetchingPackages = "Fetching Packages"
+        case updatingPackages = "Updating Packages"
+        case checkingOutPackages = "Checking Out Packages"
         case compiling = "Compiling"
         case linking = "Linking"
         case signing = "Signing"
@@ -25,6 +29,10 @@ struct BuildProgress {
         var icon: String {
             switch self {
             case .preparing: return "⏳"
+            case .resolvingPackages: return "📦"
+            case .fetchingPackages: return "⬇️"
+            case .updatingPackages: return "🔄"
+            case .checkingOutPackages: return "🔖"
             case .compiling: return "🔨"
             case .linking: return "🔗"
             case .signing: return "🔏"
@@ -82,24 +90,20 @@ actor BuildManager {
             await bootSimulatorIfNeeded(deviceId: config.device.id)
         }
 
-        // Use persistent derived data path for incremental builds
-        let projectHash = config.project.path.path.hash
-        let derivedDataPath = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("xcode-runner")
-            .appendingPathComponent("\(config.project.name)-\(abs(projectHash))")
-            .path
+        // Use Xcode's DerivedData location to share package caches with Xcode
+        let derivedDataPath = resolveDerivedDataPath(config: config, progress: progress)
 
-        // Create cache directory if needed
+        // Create derived data directory if needed
         try? FileManager.default.createDirectory(atPath: derivedDataPath, withIntermediateDirectories: true)
 
         var arguments = [
             config.project.type.flag, config.project.path.path,
             "-scheme", config.scheme,
             "-configuration", config.configuration,
-            "-derivedDataPath", derivedDataPath,
             "-parallelizeTargets",
             "-allowProvisioningUpdates",
         ]
+        arguments += ["-derivedDataPath", derivedDataPath]
 
         // Add destination based on device type
         let destination: String
@@ -189,6 +193,12 @@ actor BuildManager {
 
         // Find the built product
         var finalProductPath = snapshot.productPath
+        if let path = finalProductPath {
+            var isDir: ObjCBool = false
+            if !FileManager.default.fileExists(atPath: path, isDirectory: &isDir) || !isDir.boolValue {
+                finalProductPath = nil
+            }
+        }
         if finalProductPath == nil && success {
             finalProductPath = findBuiltProduct(in: derivedDataPath, scheme: config.scheme)
         }
@@ -260,18 +270,19 @@ actor BuildManager {
 
         do {
             try checkProcess.run()
-            checkProcess.waitUntilExit()
-
-            let data = checkPipe.fileHandleForReading.readDataToEndOfFile()
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let devices = json["devices"] as? [String: [[String: Any]]] {
-                for (_, deviceList) in devices {
-                    for device in deviceList {
-                        if let udid = device["udid"] as? String,
-                           udid == deviceId,
-                           let state = device["state"] as? String,
-                           state == "Booted" {
-                            return // Already booted
+            let didFinish = waitForProcess(checkProcess, timeout: 3)
+            if didFinish {
+                let data = checkPipe.fileHandleForReading.readDataToEndOfFile()
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let devices = json["devices"] as? [String: [[String: Any]]] {
+                    for (_, deviceList) in devices {
+                        for device in deviceList {
+                            if let udid = device["udid"] as? String,
+                               udid == deviceId,
+                               let state = device["state"] as? String,
+                               state == "Booted" {
+                                return // Already booted
+                            }
                         }
                     }
                 }
@@ -289,7 +300,7 @@ actor BuildManager {
 
         do {
             try bootProcess.run()
-            bootProcess.waitUntilExit()
+            _ = waitForProcess(bootProcess, timeout: 8)
 
             // Give it a moment to fully boot
             try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -302,6 +313,140 @@ actor BuildManager {
 
     func cancel() {
         process?.terminate()
+    }
+
+    private func resolveDerivedDataPath(config: BuildConfiguration, progress: @escaping (BuildProgress) -> Void) -> String {
+        let root = xcodeDerivedDataRoot()
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: root, withIntermediateDirectories: true)
+
+        let projectPath = config.project.path.path
+        let projectName = config.project.name
+
+        if let existing = findXcodeDerivedData(for: projectPath, projectName: projectName, root: root) {
+            if isDerivedDataCorrupted(at: existing) {
+                progress(BuildProgress(
+                    phase: .processing,
+                    percentage: 2,
+                    message: "Existing Xcode derived data looks corrupted, using a fresh folder...",
+                    detail: nil
+                ))
+            } else {
+                return existing
+            }
+        }
+
+        let fallback = "\(root)/\(projectName)-\(stableHash(for: projectPath))"
+        if isDerivedDataCorrupted(at: fallback) {
+            progress(BuildProgress(
+                phase: .processing,
+                percentage: 2,
+                message: "Cleaning derived data (corrupted package state)...",
+                detail: nil
+            ))
+            try? fm.removeItem(atPath: fallback)
+        }
+
+        return fallback
+    }
+
+    private func xcodeDerivedDataRoot() -> String {
+        let fm = FileManager.default
+        let libraryURL = fm.urls(for: .libraryDirectory, in: .userDomainMask).first
+            ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Library")
+        return libraryURL.appendingPathComponent("Developer/Xcode/DerivedData").path
+    }
+
+    private func findXcodeDerivedData(for projectPath: String, projectName: String, root: String) -> String? {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(atPath: root) else { return nil }
+
+        let normalizedPath = URL(fileURLWithPath: projectPath).resolvingSymlinksInPath().path
+        let fileURLPath = URL(fileURLWithPath: projectPath).absoluteString
+        let candidates = entries.filter { $0.hasPrefix("\(projectName)-") }
+
+        var bestMatch: (path: String, modified: Date) = ("", .distantPast)
+        for entry in candidates {
+            let derivedPath = "\(root)/\(entry)"
+            let infoPath = "\(derivedPath)/info.plist"
+
+            guard let data = fm.contents(atPath: infoPath),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) else {
+                continue
+            }
+
+            if plistContainsPath(plist, paths: [projectPath, normalizedPath, fileURLPath]) {
+                let attrs = (try? fm.attributesOfItem(atPath: derivedPath)) ?? [:]
+                let modified = attrs[.modificationDate] as? Date ?? .distantPast
+                if modified > bestMatch.modified {
+                    bestMatch = (derivedPath, modified)
+                }
+            }
+        }
+
+        return bestMatch.path.isEmpty ? nil : bestMatch.path
+    }
+
+    private func plistContainsPath(_ value: Any, paths: [String]) -> Bool {
+        if let string = value as? String {
+            return paths.contains(where: { string.contains($0) })
+        }
+        if let dict = value as? [String: Any] {
+            return dict.values.contains(where: { plistContainsPath($0, paths: paths) })
+        }
+        if let array = value as? [Any] {
+            return array.contains(where: { plistContainsPath($0, paths: paths) })
+        }
+        return false
+    }
+
+    private func isDerivedDataCorrupted(at path: String) -> Bool {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+
+        guard fm.fileExists(atPath: path, isDirectory: &isDir) else { return false }
+        if !isDir.boolValue { return true }
+
+        let sourcePackagesPath = "\(path)/SourcePackages"
+        guard fm.fileExists(atPath: sourcePackagesPath, isDirectory: &isDir) else { return false }
+        if !isDir.boolValue { return true }
+
+        let workspaceStatePath = "\(sourcePackagesPath)/workspace-state.json"
+        guard fm.fileExists(atPath: workspaceStatePath) else { return false }
+        guard let data = fm.contents(atPath: workspaceStatePath) else { return true }
+
+        do {
+            _ = try JSONSerialization.jsonObject(with: data)
+        } catch {
+            return true
+        }
+
+        return false
+    }
+
+    private func stableHash(for value: String) -> String {
+        var hash: UInt64 = 1469598103934665603
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1099511628211
+        }
+        return String(format: "%016llx", hash)
+    }
+
+    private func waitForProcess(_ process: Process, timeout: TimeInterval) -> Bool {
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global(qos: .utility).async {
+            process.waitUntilExit()
+            group.leave()
+        }
+
+        let result = group.wait(timeout: .now() + timeout)
+        if result == .timedOut {
+            process.terminate()
+            return false
+        }
+        return true
     }
 }
 
@@ -334,6 +479,59 @@ private final class BuildOutputCollector: @unchecked Sendable {
         lock.lock()
         for line in output.components(separatedBy: .newlines) where !line.isEmpty {
             outputLines.append(line)
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowercased = trimmed.lowercased()
+
+            if lowercased == "resolve package graph" || lowercased.contains("resolving package graph") {
+                updates.append(BuildProgress(
+                    phase: .resolvingPackages,
+                    percentage: 5,
+                    message: "Resolving package graph...",
+                    detail: nil
+                ))
+            } else if lowercased.hasPrefix("fetching ") || lowercased.hasPrefix("cloning ") {
+                updates.append(BuildProgress(
+                    phase: .fetchingPackages,
+                    percentage: 10,
+                    message: packageMessage(prefix: "Fetching", line: trimmed),
+                    detail: nil
+                ))
+            } else if lowercased.hasPrefix("updating ") {
+                updates.append(BuildProgress(
+                    phase: .updatingPackages,
+                    percentage: 10,
+                    message: packageMessage(prefix: "Updating", line: trimmed),
+                    detail: nil
+                ))
+            } else if lowercased.contains("checking out") {
+                updates.append(BuildProgress(
+                    phase: .checkingOutPackages,
+                    percentage: 12,
+                    message: packageMessage(prefix: "Checking out", line: trimmed),
+                    detail: nil
+                ))
+            } else if lowercased.contains("resolved source packages") {
+                updates.append(BuildProgress(
+                    phase: .resolvingPackages,
+                    percentage: 15,
+                    message: "Resolved source packages",
+                    detail: nil
+                ))
+            } else if lowercased.contains("compute dependency graph") || lowercased.contains("computing dependency graph") {
+                updates.append(BuildProgress(
+                    phase: .processing,
+                    percentage: 20,
+                    message: "Computing dependency graph...",
+                    detail: nil
+                ))
+            } else if lowercased.contains("create build description") || lowercased.contains("creating build description") {
+                updates.append(BuildProgress(
+                    phase: .processing,
+                    percentage: 25,
+                    message: "Creating build description...",
+                    detail: nil
+                ))
+            }
 
             if line.contains("Compiling") || line.hasPrefix("CompileC") || line.hasPrefix("CompileSwift") {
                 compiledFiles += 1
@@ -382,7 +580,6 @@ private final class BuildOutputCollector: @unchecked Sendable {
                 ))
             }
 
-            let lowercased = line.lowercased()
             if lowercased.contains("passcode protected") || lowercased.contains("device is locked") {
                 updates.append(BuildProgress(
                     phase: .waitingForDevice,
@@ -413,9 +610,9 @@ private final class BuildOutputCollector: @unchecked Sendable {
                 ))
             }
 
-            if line.contains(".app") && line.contains("Build/Products") {
-                if let range = line.range(of: #"[^\s]+\.app"#, options: .regularExpression) {
-                    productPath = String(line[range])
+            if line.contains(".app") {
+                if let appPath = extractAppPath(from: line) {
+                    productPath = appPath
                 }
             }
         }
@@ -450,5 +647,93 @@ private final class BuildOutputCollector: @unchecked Sendable {
             return String(line[range])
         }
         return nil
+    }
+
+    private func extractAppPath(from line: String) -> String? {
+        if let path = extractAppPathFromBuildProducts(line) {
+            return path
+        }
+
+        if let range = line.range(of: #"/[^\n]*?\.app"#, options: .regularExpression) {
+            return String(line[range]).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+        }
+
+        return nil
+    }
+
+    private func extractAppPathFromBuildProducts(_ line: String) -> String? {
+        guard let buildRange = line.range(of: "Build/Products") else { return nil }
+
+        let prefix = line[..<buildRange.lowerBound]
+        let startIndex = prefix.lastIndex(where: { $0 == " " || $0 == "\t" })
+            .map { line.index(after: $0) } ?? line.startIndex
+
+        guard let appRange = line[buildRange.lowerBound...].range(of: ".app") else { return nil }
+
+        let path = String(line[startIndex..<appRange.upperBound])
+        return path.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+    }
+
+    private func packageMessage(prefix: String, line: String) -> String {
+        if let name = extractPackageName(from: line) {
+            return "\(prefix) \(name)..."
+        }
+        return "\(prefix) packages..."
+    }
+
+    private func extractPackageName(from line: String) -> String? {
+        if let url = extractURL(from: line) {
+            return shortRepoName(from: url)
+        }
+
+        if let range = line.range(of: "package ") {
+            let name = line[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                return name.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            }
+        }
+
+        return nil
+    }
+
+    private func extractURL(from line: String) -> String? {
+        if let range = line.range(of: #"https?://\S+"#, options: .regularExpression) {
+            return String(line[range])
+        }
+        if let range = line.range(of: #"git@\S+"#, options: .regularExpression) {
+            return String(line[range])
+        }
+        return nil
+    }
+
+    private func shortRepoName(from url: String) -> String {
+        var cleaned = url
+        while let last = cleaned.last, ".,)]".contains(last) {
+            cleaned.removeLast()
+        }
+
+        if cleaned.hasPrefix("git@") {
+            if let colon = cleaned.firstIndex(of: ":") {
+                cleaned = String(cleaned[cleaned.index(after: colon)...])
+            }
+        } else if let schemeRange = cleaned.range(of: "://") {
+            cleaned = String(cleaned[schemeRange.upperBound...])
+            if let slash = cleaned.firstIndex(of: "/") {
+                cleaned = String(cleaned[cleaned.index(after: slash)...])
+            }
+        }
+
+        if cleaned.hasSuffix(".git") {
+            cleaned.removeLast(4)
+        }
+
+        let parts = cleaned.split(separator: "/")
+        if parts.count >= 2 {
+            let owner = parts[parts.count - 2]
+            let repo = parts[parts.count - 1]
+            return "\(owner)/\(repo)"
+        }
+
+        return cleaned
     }
 }

@@ -89,6 +89,10 @@ enum Terminal {
         return (80, 24)
     }
 
+    static var isInteractive: Bool {
+        isatty(STDIN_FILENO) != 0
+    }
+
     // MARK: - Input
 
     static func readKey() -> Key? {
