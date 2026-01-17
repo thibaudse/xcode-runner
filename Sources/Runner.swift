@@ -254,33 +254,100 @@ actor AppRunner {
         waitForDebugger: Bool,
         progress: @escaping (RunProgress) -> Void
     ) async throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        var arguments = ["devicectl", "device", "process", "launch", "--device", deviceId]
-        if waitForDebugger {
-            arguments.append("--start-stopped")
-        }
-        arguments.append(bundleId)
-        process.arguments = arguments
+        func attemptLaunch() throws -> String? {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            var arguments = ["devicectl", "device", "process", "launch", "--device", deviceId]
+            if waitForDebugger {
+                arguments.append("--start-stopped")
+            }
+            arguments.append(bundleId)
+            process.arguments = arguments
 
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
+            let outputPipe = Pipe()
+            let errorPipe = Pipe()
+            process.standardOutput = outputPipe
+            process.standardError = errorPipe
 
-        try process.run()
-        process.waitUntilExit()
+            try process.run()
+            process.waitUntilExit()
 
-        if process.terminationStatus != 0 {
+            guard process.terminationStatus != 0 else { return nil }
+
             let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
             let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+            return errorMessage
+        }
 
-            if errorMessage.contains("passcode") || errorMessage.contains("locked") || errorMessage.contains("unlock") {
-                throw RunError.deviceNotReady("Please unlock your device to launch the app")
+        if let errorMessage = try attemptLaunch() {
+            if isDeviceLockedError(errorMessage) {
+                try await waitForDeviceToBeReady(deviceId: deviceId, progress: progress)
+                progress(RunProgress(phase: .launching, message: "Retrying launch..."))
+
+                if let retryMessage = try attemptLaunch() {
+                    if isDeviceLockedError(retryMessage) {
+                        throw RunError.deviceNotReady("Please unlock your device to launch the app")
+                    }
+                    throw RunError.launchFailed(retryMessage.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+                return
             }
 
             throw RunError.launchFailed(errorMessage.trimmingCharacters(in: .whitespacesAndNewlines))
         }
+    }
+
+    private func waitForDeviceToBeReady(
+        deviceId: String,
+        progress: @escaping (RunProgress) -> Void
+    ) async throws {
+        progress(RunProgress(phase: .waitingForUnlock, message: "Waiting for device to be unlocked..."))
+
+        while true {
+            try Task.checkCancellation()
+            if try isDeviceReady(deviceId: deviceId) {
+                return
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+    }
+
+    private func isDeviceReady(deviceId: String) throws -> Bool {
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent("devicectl-lockstate-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["devicectl", "device", "info", "lockState", "--device", deviceId, "--json-output", tempURL.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0,
+              let data = try? Data(contentsOf: tempURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = json["result"] as? [String: Any] else {
+            return false
+        }
+
+        if let passcodeRequired = result["passcodeRequired"] as? Bool {
+            return !passcodeRequired
+        }
+        if let locked = result["locked"] as? Bool {
+            return !locked
+        }
+        if let state = result["state"] as? String {
+            let normalized = state.lowercased()
+            return normalized == "ready" || normalized == "unlocked"
+        }
+        if let status = result["status"] as? String {
+            let normalized = status.lowercased()
+            return normalized == "ready" || normalized == "unlocked"
+        }
+
+        return false
     }
 
     private nonisolated func parseDeviceOutput(_ output: String, progress: @escaping (RunProgress) -> Void) {
@@ -297,6 +364,11 @@ actor AppRunner {
         } else if lowercased.contains("installing") {
             progress(RunProgress(phase: .installing, message: "Installing app..."))
         }
+    }
+
+    private func isDeviceLockedError(_ message: String) -> Bool {
+        let lowercased = message.lowercased()
+        return lowercased.contains("passcode") || lowercased.contains("locked") || lowercased.contains("unlock")
     }
 
     // MARK: - Bundle ID Extraction
