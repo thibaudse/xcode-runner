@@ -105,6 +105,10 @@ actor BuildManager {
         ]
         arguments += ["-derivedDataPath", derivedDataPath]
 
+        if PackageResolutionPolicy.shouldDisableAutomaticResolution(for: config.project, derivedDataPath: derivedDataPath) {
+            arguments.append("-disableAutomaticPackageResolution")
+        }
+
         // Add destination based on device type
         let destination: String
         switch config.device.type {
