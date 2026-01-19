@@ -83,6 +83,13 @@ struct ProjectManager {
     // MARK: - Schemes
 
     func discoverSchemes(for projectURL: URL, type: XcodeProject.ProjectType) throws -> [String] {
+        let cacheKey = projectURL.path
+        let signature = SchemeSignatureBuilder.signature(for: projectURL, type: type)
+
+        if let cachedSchemes = SchemeCacheStore.shared.cachedSchemes(for: cacheKey, signature: signature) {
+            return cachedSchemes
+        }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcodebuild")
         process.arguments = [
@@ -114,6 +121,8 @@ struct ProjectManager {
         }
 
         let response = try JSONDecoder().decode(ListResponse.self, from: data)
-        return response.workspace?.schemes ?? response.project?.schemes ?? []
+        let schemes = response.workspace?.schemes ?? response.project?.schemes ?? []
+        SchemeCacheStore.shared.storeSchemes(schemes, for: cacheKey, signature: signature)
+        return schemes
     }
 }
