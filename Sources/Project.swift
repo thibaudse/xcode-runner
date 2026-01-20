@@ -1,11 +1,27 @@
 import Foundation
 
 /// Represents an Xcode project or workspace
-struct XcodeProject {
+class XcodeProject {
     let path: URL
     let type: ProjectType
     let name: String
-    let schemes: [String]
+
+    /// Schemes are loaded lazily to avoid slow xcodebuild -list calls when not needed
+    private var _schemes: [String]?
+    var schemes: [String] {
+        if let cached = _schemes {
+            return cached
+        }
+        let loaded = (try? ProjectManager().discoverSchemes(for: path, type: type)) ?? []
+        _schemes = loaded
+        return loaded
+    }
+
+    init(path: URL, type: ProjectType, name: String) {
+        self.path = path
+        self.type = type
+        self.name = name
+    }
 
     enum ProjectType {
         case workspace
@@ -53,31 +69,21 @@ struct ProjectManager {
 
         // Look for workspaces first (they take precedence)
         for url in contents where url.pathExtension == "xcworkspace" {
-            if let project = try? loadProject(at: url, type: .workspace) {
-                projects.append(project)
-            }
+            projects.append(loadProject(at: url, type: .workspace))
         }
 
         // Then look for project files
         for url in contents where url.pathExtension == "xcodeproj" {
-            if let project = try? loadProject(at: url, type: .project) {
-                projects.append(project)
-            }
+            projects.append(loadProject(at: url, type: .project))
         }
 
         return projects
     }
 
-    private func loadProject(at url: URL, type: XcodeProject.ProjectType) throws -> XcodeProject {
+    private func loadProject(at url: URL, type: XcodeProject.ProjectType) -> XcodeProject {
         let name = url.deletingPathExtension().lastPathComponent
-        let schemes = try discoverSchemes(for: url, type: type)
-
-        return XcodeProject(
-            path: url,
-            type: type,
-            name: name,
-            schemes: schemes
-        )
+        // Schemes are loaded lazily when first accessed
+        return XcodeProject(path: url, type: type, name: name)
     }
 
     // MARK: - Schemes

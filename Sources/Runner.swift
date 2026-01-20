@@ -1,5 +1,179 @@
 import Foundation
 
+/// Manages streaming console output from a running app
+final class ConsoleStreamer: @unchecked Sendable {
+    private var appProcess: Process?
+    private var logStreamProcess: Process?
+
+    /// Streams console output from a simulator app until stopped
+    func streamSimulator(
+        deviceId: String,
+        bundleId: String,
+        appName: String
+    ) throws {
+        // Print a visual separator before logs start
+        print()
+        print("─────────────────────────────────────────────────────────────────────".dim)
+        print("Console Output".bold + " (Ctrl+C to stop)".dim)
+        print("─────────────────────────────────────────────────────────────────────".dim)
+        print()
+        Terminal.flush()
+
+        // Start OS log stream in the background for system logs
+        // Use process name filter to capture app logs like Xcode does
+        let logProcess = Process()
+        logProcess.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        logProcess.arguments = [
+            "simctl", "spawn", deviceId, "log", "stream",
+            "--level", "debug",
+            "--style", "compact",
+            "--process", appName
+        ]
+
+        let logPipe = Pipe()
+        logProcess.standardOutput = logPipe
+        logProcess.standardError = logPipe
+
+        logPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
+            self?.printLogOutput(output, source: .osLog)
+        }
+
+        self.logStreamProcess = logProcess
+        try logProcess.run()
+
+        // Launch app with console output (this blocks until app terminates)
+        let appProcess = Process()
+        appProcess.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        appProcess.arguments = ["simctl", "launch", "--console-pty", deviceId, bundleId]
+
+        let appOutputPipe = Pipe()
+        let appErrorPipe = Pipe()
+        appProcess.standardOutput = appOutputPipe
+        appProcess.standardError = appErrorPipe
+
+        appOutputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
+            self?.printLogOutput(output, source: .stdout)
+        }
+
+        appErrorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
+            self?.printLogOutput(output, source: .stderr)
+        }
+
+        self.appProcess = appProcess
+        try appProcess.run()
+
+        // Wait for app to exit (or be terminated)
+        appProcess.waitUntilExit()
+
+        // Clean up
+        stop()
+    }
+
+    /// Streams console output from a physical device app until stopped
+    func streamPhysicalDevice(
+        deviceId: String,
+        bundleId: String
+    ) throws {
+        // Print a visual separator before logs start
+        print()
+        print("─────────────────────────────────────────────────────────────────────".dim)
+        print("Console Output".bold + " (Ctrl+C to stop)".dim)
+        print("─────────────────────────────────────────────────────────────────────".dim)
+        print()
+        Terminal.flush()
+
+        // Launch app with console output
+        let appProcess = Process()
+        appProcess.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        appProcess.arguments = [
+            "devicectl", "device", "process", "launch",
+            "--console",
+            "--device", deviceId,
+            bundleId
+        ]
+
+        let appOutputPipe = Pipe()
+        let appErrorPipe = Pipe()
+        appProcess.standardOutput = appOutputPipe
+        appProcess.standardError = appErrorPipe
+
+        appOutputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
+            self?.printLogOutput(output, source: .stdout)
+        }
+
+        appErrorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
+            self?.printLogOutput(output, source: .stderr)
+        }
+
+        self.appProcess = appProcess
+        try appProcess.run()
+
+        // Wait for app to exit (or be terminated)
+        appProcess.waitUntilExit()
+
+        // Clean up
+        stop()
+    }
+
+    /// Stops all streaming processes
+    func stop() {
+        if let process = logStreamProcess, process.isRunning {
+            process.terminate()
+        }
+        logStreamProcess = nil
+
+        if let process = appProcess, process.isRunning {
+            process.terminate()
+        }
+        appProcess = nil
+    }
+
+    private enum LogSource {
+        case stdout
+        case stderr
+        case osLog
+    }
+
+    private func printLogOutput(_ output: String, source: LogSource) {
+        // Split into lines and print each
+        let lines = output.split(separator: "\n", omittingEmptySubsequences: false)
+        for line in lines {
+            guard !line.isEmpty else { continue }
+            let lineStr = String(line)
+
+            // Skip the PID output line from simctl launch
+            if lineStr.contains(": ") && lineStr.split(separator: ":").first?.allSatisfy({ $0.isNumber }) == true {
+                continue
+            }
+
+            // Print short fixed-width divider above each log entry
+            print("────────".dim)
+            switch source {
+            case .stdout:
+                print(lineStr)
+            case .stderr:
+                print(lineStr.red)
+            case .osLog:
+                print(lineStr.dim)
+            }
+        }
+        Terminal.flush()
+    }
+}
+
+/// Global console streamer instance for signal handler access
+var globalConsoleStreamer: ConsoleStreamer?
+
 /// Handles running apps on devices
 actor AppRunner {
 
@@ -33,6 +207,7 @@ actor AppRunner {
             case verifying
             case launching
             case running
+            case streaming
             case failed
         }
 
@@ -47,6 +222,7 @@ actor AppRunner {
             case .verifying: return "✓"
             case .launching: return "🚀"
             case .running: return "▶️"
+            case .streaming: return "📺"
             case .failed: return "❌"
             }
         }
@@ -75,6 +251,39 @@ actor AppRunner {
         try await launchOnSimulator(deviceId: device.id, bundleId: bundleId)
 
         progress(RunProgress(phase: .running, message: "App is running on \(device.name)"))
+    }
+
+    /// Runs app on simulator with console output streaming until stopped
+    func runOnSimulatorWithConsole(
+        device: Device,
+        appPath: String,
+        bundleId: String,
+        progress: @escaping (RunProgress) -> Void
+    ) async throws {
+        // Boot simulator if needed
+        if device.state != .booted {
+            progress(RunProgress(phase: .bootingDevice, message: "Booting \(device.name)..."))
+            try await bootSimulator(deviceId: device.id)
+        }
+
+        // Install app
+        progress(RunProgress(phase: .installing, message: "Installing app..."))
+        try await installOnSimulator(deviceId: device.id, appPath: appPath)
+
+        // Extract app name from path for log filtering
+        let appName = URL(fileURLWithPath: appPath).deletingPathExtension().lastPathComponent
+
+        // Launch app with console streaming
+        progress(RunProgress(phase: .streaming, message: "Streaming logs from \(device.name)... (Press Ctrl+C to stop)"))
+
+        let streamer = ConsoleStreamer()
+        globalConsoleStreamer = streamer
+
+        try streamer.streamSimulator(
+            deviceId: device.id,
+            bundleId: bundleId,
+            appName: appName
+        )
     }
 
     private func bootSimulator(deviceId: String) async throws {
@@ -173,6 +382,32 @@ actor AppRunner {
         )
 
         progress(RunProgress(phase: .running, message: "App is running on \(device.name)"))
+    }
+
+    /// Runs app on physical device with console output streaming until stopped
+    func runOnPhysicalDeviceWithConsole(
+        device: Device,
+        appPath: String,
+        bundleId: String,
+        progress: @escaping (RunProgress) -> Void
+    ) async throws {
+        // Check device connectivity first
+        progress(RunProgress(phase: .checkingDevice, message: "Checking device connection..."))
+
+        // Install using devicectl with progress monitoring
+        progress(RunProgress(phase: .installing, message: "Installing app on \(device.name)..."))
+        try await installOnPhysicalDevice(deviceId: device.id, appPath: appPath, progress: progress)
+
+        // Launch app with console streaming
+        progress(RunProgress(phase: .streaming, message: "Streaming logs from \(device.name)... (Press Ctrl+C to stop)"))
+
+        let streamer = ConsoleStreamer()
+        globalConsoleStreamer = streamer
+
+        try streamer.streamPhysicalDevice(
+            deviceId: device.id,
+            bundleId: bundleId
+        )
     }
 
     private func installOnPhysicalDevice(

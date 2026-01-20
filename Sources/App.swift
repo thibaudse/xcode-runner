@@ -101,11 +101,13 @@ actor XcodeRunner {
 
             print()
 
-            // Step 5: Run
+            // Step 5: Run with console streaming
+            // This blocks until the app terminates or user presses Ctrl+C
             try await runApp(device: device, appPath: productPath)
 
+            // Only reached if app terminates naturally
             print()
-            print("✅ ".green + "Done! Your app is running on \(device.name).".bold)
+            print("App terminated.".dim)
             print()
 
         } catch {
@@ -118,8 +120,14 @@ actor XcodeRunner {
     private func setupTerminal() {
         // Setup signal handlers
         signal(SIGINT) { _ in
+            // Stop any running console streamer
+            globalConsoleStreamer?.stop()
+            globalConsoleStreamer = nil
+
             Terminal.showCursor()
             Terminal.disableRawMode()
+            print()
+            print("Stopped.".dim)
             exit(0)
         }
     }
@@ -140,6 +148,7 @@ actor XcodeRunner {
 
     private func selectProject() async throws -> XcodeProject {
         print("📁 ".bold + "Finding Xcode project...".bold)
+        Terminal.flush()
 
         let manager = ProjectManager()
         let projects = try manager.discoverProjects()
@@ -175,19 +184,18 @@ actor XcodeRunner {
     private func selectScheme(from project: XcodeProject) async throws -> String {
         print("🎯 ".bold + "Selecting scheme...".bold)
 
+        // If scheme is specified via CLI, use it directly without loading schemes
+        if let name = schemeName {
+            print("   Using: \(name)".dim)
+            await recentItems.addRecentScheme(name, forProject: project.path.path)
+            return name
+        }
+
+        // Only load schemes if we need to show selection UI
         let schemes = project.schemes
 
         if schemes.isEmpty {
             throw AppError.noSchemesFound
-        }
-
-        if let name = schemeName {
-            if schemes.contains(name) {
-                print("   Using: \(name)".dim)
-                await recentItems.addRecentScheme(name, forProject: project.path.path)
-                return name
-            }
-            throw AppError.schemeNotFound(name)
         }
 
         if schemes.count == 1 {
@@ -626,16 +634,17 @@ actor XcodeRunner {
             print("   \(progress.icon) \(progress.message)")
         }
 
+        // Use console streaming methods that capture app output
         switch device.type {
         case .simulator:
-            try await appRunner.runOnSimulator(
+            try await appRunner.runOnSimulatorWithConsole(
                 device: device,
                 appPath: appPath,
                 bundleId: bundleId,
                 progress: progressHandler
             )
         case .physical:
-            try await appRunner.runOnPhysicalDevice(
+            try await appRunner.runOnPhysicalDeviceWithConsole(
                 device: device,
                 appPath: appPath,
                 bundleId: bundleId,
