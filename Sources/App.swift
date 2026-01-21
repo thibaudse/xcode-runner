@@ -609,7 +609,7 @@ actor XcodeRunner {
             print("   ✅ Build succeeded in \(String(format: "%.1f", result.duration))s".green)
         } else {
             print("   ❌ Build failed".red)
-            for error in result.errors.prefix(5) {
+            for error in result.errors {
                 print("      \(error)".red)
             }
         }

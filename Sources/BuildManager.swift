@@ -620,6 +620,13 @@ private final class BuildOutputCollector: @unchecked Sendable {
                     productPath = appPath
                 }
             }
+
+            // Collect errors and warnings from stdout as well (xcodebuild outputs them here)
+            if line.contains("error:") {
+                errors.append(line)
+            } else if line.contains("warning:") {
+                warnings.append(line)
+            }
         }
         lock.unlock()
 
@@ -632,9 +639,13 @@ private final class BuildOutputCollector: @unchecked Sendable {
         lock.lock()
         for line in output.components(separatedBy: .newlines) where !line.isEmpty {
             if line.contains("error:") {
-                errors.append(line)
+                if !errors.contains(line) {
+                    errors.append(line)
+                }
             } else if line.contains("warning:") {
-                warnings.append(line)
+                if !warnings.contains(line) {
+                    warnings.append(line)
+                }
             }
         }
         lock.unlock()
