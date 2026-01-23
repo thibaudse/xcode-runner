@@ -125,6 +125,106 @@ final class ConsoleStreamer: @unchecked Sendable {
         stop()
     }
 
+    /// Streams console output from a Mac app until stopped
+    func streamMacApp(
+        appPath: String,
+        bundleId: String
+    ) throws {
+        // Print a visual separator before logs start
+        print()
+        print("─────────────────────────────────────────────────────────────────────".dim)
+        print("Console Output".bold + " (Ctrl+C to stop)".dim)
+        print("─────────────────────────────────────────────────────────────────────".dim)
+        print()
+        Terminal.flush()
+
+        // Extract app name for log filtering (the executable name inside the bundle)
+        let appName = URL(fileURLWithPath: appPath).deletingPathExtension().lastPathComponent
+
+        // Launch the Mac app first so we can get its PID
+        let appProcess = Process()
+        appProcess.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        // Use -a to launch by app path, --stdout and --stderr to capture output
+        appProcess.arguments = [appPath]
+
+        appProcess.standardOutput = FileHandle.nullDevice
+        appProcess.standardError = FileHandle.nullDevice
+
+        self.appProcess = appProcess
+        try appProcess.run()
+        appProcess.waitUntilExit()
+
+        // Give the app a moment to start
+        Thread.sleep(forTimeInterval: 0.5)
+
+        // Find the app's PID
+        let pidProcess = Process()
+        pidProcess.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        pidProcess.arguments = ["-x", appName]
+
+        let pidPipe = Pipe()
+        pidProcess.standardOutput = pidPipe
+        pidProcess.standardError = FileHandle.nullDevice
+
+        try pidProcess.run()
+        pidProcess.waitUntilExit()
+
+        let pidData = pidPipe.fileHandleForReading.readDataToEndOfFile()
+        guard let pidString = String(data: pidData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let pid = Int(pidString.components(separatedBy: .newlines).first ?? "") else {
+            print("App launched but couldn't find its PID for log streaming.".yellow)
+            print("App is running - press Ctrl+C to stop.".dim)
+            // Wait indefinitely until Ctrl+C
+            dispatchMain()
+        }
+
+        // Start OS log stream filtered by PID
+        let logProcess = Process()
+        logProcess.executableURL = URL(fileURLWithPath: "/usr/bin/log")
+        logProcess.arguments = [
+            "stream",
+            "--level", "info",
+            "--style", "compact",
+            "--predicate", "processIdentifier == \(pid)"
+        ]
+
+        let logPipe = Pipe()
+        logProcess.standardOutput = logPipe
+        logProcess.standardError = logPipe
+
+        logPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
+            self?.printLogOutput(output, source: .osLog)
+        }
+
+        self.logStreamProcess = logProcess
+        try logProcess.run()
+
+        // Wait until app exits or user presses Ctrl+C
+        // Poll to check if app is still running
+        while true {
+            let checkProcess = Process()
+            checkProcess.executableURL = URL(fileURLWithPath: "/bin/kill")
+            checkProcess.arguments = ["-0", String(pid)]
+            checkProcess.standardOutput = FileHandle.nullDevice
+            checkProcess.standardError = FileHandle.nullDevice
+
+            try? checkProcess.run()
+            checkProcess.waitUntilExit()
+
+            if checkProcess.terminationStatus != 0 {
+                // Process no longer exists
+                break
+            }
+
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+
+        // Clean up
+        stop()
+    }
+
     /// Stops all streaming processes
     func stop() {
         if let process = logStreamProcess, process.isRunning {
@@ -578,10 +678,66 @@ actor AppRunner {
         return lowercased.contains("passcode") || lowercased.contains("locked") || lowercased.contains("unlock")
     }
 
+    // MARK: - Mac
+
+    func runOnMac(
+        appPath: String,
+        bundleId: String,
+        progress: @escaping (RunProgress) -> Void
+    ) async throws {
+        progress(RunProgress(phase: .launching, message: "Launching app..."))
+
+        // Simply open the app using the `open` command
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [appPath]
+
+        let errorPipe = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = errorPipe
+
+        try process.run()
+        process.waitUntilExit()
+
+        if process.terminationStatus != 0 {
+            let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let errorMessage = String(data: errorData, encoding: .utf8) ?? "Unknown error"
+            throw RunError.launchFailed(errorMessage.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        progress(RunProgress(phase: .running, message: "App is running"))
+    }
+
+    /// Runs Mac app with console output streaming
+    func runOnMacWithConsole(
+        appPath: String,
+        bundleId: String,
+        progress: @escaping (RunProgress) -> Void
+    ) async throws {
+        progress(RunProgress(phase: .streaming, message: "Streaming logs... (Press Ctrl+C to stop)"))
+
+        let streamer = ConsoleStreamer()
+        globalConsoleStreamer = streamer
+
+        try streamer.streamMacApp(appPath: appPath, bundleId: bundleId)
+    }
+
     // MARK: - Bundle ID Extraction
 
     static func extractBundleId(from appPath: String) -> String? {
-        let infoPlistPath = "\(appPath)/Info.plist"
+        // Try iOS-style path first (Info.plist directly in .app)
+        let iosInfoPlistPath = "\(appPath)/Info.plist"
+        // Then try macOS-style path (Info.plist in Contents/)
+        let macOSInfoPlistPath = "\(appPath)/Contents/Info.plist"
+
+        let infoPlistPath: String
+        if FileManager.default.fileExists(atPath: iosInfoPlistPath) {
+            infoPlistPath = iosInfoPlistPath
+        } else if FileManager.default.fileExists(atPath: macOSInfoPlistPath) {
+            infoPlistPath = macOSInfoPlistPath
+        } else {
+            return nil
+        }
 
         guard let data = FileManager.default.contents(atPath: infoPlistPath),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],

@@ -1,10 +1,11 @@
 import Foundation
 
-/// Represents a device that can run iOS apps
+/// Represents a device that can run apps
 struct Device: Identifiable, Hashable {
     let id: String
     let name: String
     let type: DeviceType
+    let platform: Platform
     let state: DeviceState
     let runtime: String?
     let osVersion: String?
@@ -12,11 +13,85 @@ struct Device: Identifiable, Hashable {
     enum DeviceType: String, CaseIterable {
         case simulator
         case physical
+        case mac  // Mac is a special case - it's the local machine
 
         var icon: String {
             switch self {
             case .simulator: return "📱"
             case .physical: return "📲"
+            case .mac: return "🖥️"
+            }
+        }
+    }
+
+    enum Platform: String, CaseIterable {
+        case iOS
+        case macOS
+        case watchOS
+        case tvOS
+        case visionOS
+
+        var displayName: String {
+            switch self {
+            case .iOS: return "iOS"
+            case .macOS: return "macOS"
+            case .watchOS: return "watchOS"
+            case .tvOS: return "tvOS"
+            case .visionOS: return "visionOS"
+            }
+        }
+
+        var icon: String {
+            switch self {
+            case .iOS: return "📱"
+            case .macOS: return "🖥️"
+            case .watchOS: return "⌚"
+            case .tvOS: return "📺"
+            case .visionOS: return "🥽"
+            }
+        }
+
+        /// The platform identifier used in xcodebuild destinations
+        var simulatorPlatform: String {
+            switch self {
+            case .iOS: return "iOS Simulator"
+            case .macOS: return "macOS"
+            case .watchOS: return "watchOS Simulator"
+            case .tvOS: return "tvOS Simulator"
+            case .visionOS: return "visionOS Simulator"
+            }
+        }
+
+        /// The platform identifier for physical devices
+        var devicePlatform: String {
+            switch self {
+            case .iOS: return "iOS"
+            case .macOS: return "macOS"
+            case .watchOS: return "watchOS"
+            case .tvOS: return "tvOS"
+            case .visionOS: return "visionOS"
+            }
+        }
+
+        /// The build products directory suffix
+        var buildProductsSuffix: String {
+            switch self {
+            case .iOS: return "iphoneos"
+            case .macOS: return "macosx"
+            case .watchOS: return "watchos"
+            case .tvOS: return "appletvos"
+            case .visionOS: return "xros"
+            }
+        }
+
+        /// The build products directory suffix for simulators
+        var simulatorBuildProductsSuffix: String {
+            switch self {
+            case .iOS: return "iphonesimulator"
+            case .macOS: return "macosx"  // macOS doesn't have a simulator
+            case .watchOS: return "watchsimulator"
+            case .tvOS: return "appletvsimulator"
+            case .visionOS: return "xrsimulator"
             }
         }
     }
@@ -46,7 +121,8 @@ struct Device: Identifiable, Hashable {
     }
 
     var displayName: String {
-        var display = "\(type.icon) \(name)"
+        let icon = type == .mac ? type.icon : platform.icon
+        var display = "\(icon) \(name)"
         if let version = osVersion {
             display += " (\(version))".dim
         }
@@ -84,11 +160,8 @@ actor DeviceManager {
         var devices: [Device] = []
 
         for (runtimeId, simDevices) in response.devices {
-            // Parse runtime to get OS version
-            let osVersion = parseRuntime(runtimeId)
-
-            // Filter to iOS devices only
-            guard runtimeId.contains("iOS") || runtimeId.contains("iPhone") else { continue }
+            // Parse runtime to get OS version and platform
+            guard let (osVersion, platform) = parseRuntime(runtimeId) else { continue }
 
             for simDevice in simDevices {
                 let state: Device.DeviceState = simDevice.state == "Booted" ? .booted : .shutdown
@@ -96,6 +169,7 @@ actor DeviceManager {
                     id: simDevice.udid,
                     name: simDevice.name,
                     type: .simulator,
+                    platform: platform,
                     state: state,
                     runtime: runtimeId,
                     osVersion: osVersion
@@ -104,22 +178,43 @@ actor DeviceManager {
             }
         }
 
-        // Sort: booted first, then by name
+        // Sort: booted first, then by platform, then by name
         return devices.sorted { lhs, rhs in
             if lhs.state == .booted && rhs.state != .booted { return true }
             if lhs.state != .booted && rhs.state == .booted { return false }
+            // Group by platform
+            if lhs.platform != rhs.platform {
+                return lhs.platform.rawValue < rhs.platform.rawValue
+            }
             return lhs.name < rhs.name
         }
     }
 
-    private func parseRuntime(_ runtimeId: String) -> String? {
+    private func parseRuntime(_ runtimeId: String) -> (version: String, platform: Device.Platform)? {
         // Format: com.apple.CoreSimulator.SimRuntime.iOS-17-0
-        let pattern = #"iOS-(\d+)-(\d+)"#
-        if let match = runtimeId.range(of: pattern, options: .regularExpression) {
-            let version = runtimeId[match]
-                .replacingOccurrences(of: "iOS-", with: "iOS ")
-                .replacingOccurrences(of: "-", with: ".")
-            return version
+        // or: com.apple.CoreSimulator.SimRuntime.watchOS-10-0
+        // or: com.apple.CoreSimulator.SimRuntime.tvOS-17-0
+        // or: com.apple.CoreSimulator.SimRuntime.xrOS-2-0
+
+        let platformPatterns: [(pattern: String, platform: Device.Platform, prefix: String)] = [
+            (#"iOS-(\d+)-(\d+)"#, .iOS, "iOS"),
+            (#"watchOS-(\d+)-(\d+)"#, .watchOS, "watchOS"),
+            (#"tvOS-(\d+)-(\d+)"#, .tvOS, "tvOS"),
+            (#"xrOS-(\d+)-(\d+)"#, .visionOS, "visionOS"),
+        ]
+
+        for (pattern, platform, prefix) in platformPatterns {
+            if let match = runtimeId.range(of: pattern, options: .regularExpression) {
+                let versionPart = String(runtimeId[match])
+                // Extract version numbers
+                let components = versionPart.components(separatedBy: "-")
+                if components.count >= 2 {
+                    let major = components[1]
+                    let minor = components.count > 2 ? components[2] : "0"
+                    let version = "\(prefix) \(major).\(minor)"
+                    return (version, platform)
+                }
+            }
         }
         return nil
     }
@@ -152,6 +247,7 @@ actor DeviceManager {
         // Parse output format:
         // == Devices ==
         // Device Name (iOS Version) (UDID)
+        // My Mac (macOS Version) (UDID)
         // == Simulators ==
         // ...
         for line in output.components(separatedBy: .newlines) {
@@ -167,43 +263,111 @@ actor DeviceManager {
 
             guard inDevicesSection, !trimmed.isEmpty else { continue }
 
-            // Parse: "Device Name (iOS Version) (UDID)"
-            // Example: "Thibaud's iPhone (18.2) (00008130-00063CA12250001C)"
-            if let match = trimmed.range(of: #"^(.+?)\s+\(([^)]+)\)\s+\(([^)]+)\)$"#, options: .regularExpression) {
-                let matchedString = String(trimmed[match])
+            // Try to parse device line - two possible formats:
+            // 1. "Device Name (Version) (UDID)" - for iOS, watchOS, tvOS devices
+            // 2. "Device Name (UDID)" - for Mac (no version in output)
 
-                // Extract parts using regex groups
-                let pattern = #"^(.+?)\s+\(([^)]+)\)\s+\(([^)]+)\)$"#
-                if let regex = try? NSRegularExpression(pattern: pattern),
-                   let result = regex.firstMatch(in: matchedString, range: NSRange(matchedString.startIndex..., in: matchedString)) {
+            // First try format with version: "Name (Version) (UDID)"
+            let patternWithVersion = #"^(.+?)\s+\(([^)]+)\)\s+\(([^)]+)\)$"#
+            if let regex = try? NSRegularExpression(pattern: patternWithVersion),
+               let result = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)) {
 
-                    let nameRange = Range(result.range(at: 1), in: matchedString)
-                    let versionRange = Range(result.range(at: 2), in: matchedString)
-                    let udidRange = Range(result.range(at: 3), in: matchedString)
+                let nameRange = Range(result.range(at: 1), in: trimmed)
+                let versionRange = Range(result.range(at: 2), in: trimmed)
+                let udidRange = Range(result.range(at: 3), in: trimmed)
 
-                    if let nameRange, let versionRange, let udidRange {
-                        let name = String(matchedString[nameRange])
-                        let version = String(matchedString[versionRange])
-                        let udid = String(matchedString[udidRange])
+                if let nameRange, let versionRange, let udidRange {
+                    let name = String(trimmed[nameRange])
+                    let version = String(trimmed[versionRange])
+                    let udid = String(trimmed[udidRange])
 
-                        // Skip "My Mac" entries
-                        guard !name.contains("My Mac") else { continue }
+                    // Determine platform and device type based on name
+                    let (platform, deviceType, osVersion) = classifyDevice(name: name, version: version)
 
-                        let device = Device(
-                            id: udid,
-                            name: name,
-                            type: .physical,
-                            state: .available,
-                            runtime: nil,
-                            osVersion: "iOS \(version)"
-                        )
-                        devices.append(device)
-                    }
+                    let device = Device(
+                        id: udid,
+                        name: name,
+                        type: deviceType,
+                        platform: platform,
+                        state: .available,
+                        runtime: nil,
+                        osVersion: osVersion
+                    )
+                    devices.append(device)
+                    continue
+                }
+            }
+
+            // Try format without version: "Name (UDID)" - typically Mac
+            let patternWithoutVersion = #"^(.+?)\s+\(([A-Fa-f0-9-]+)\)$"#
+            if let regex = try? NSRegularExpression(pattern: patternWithoutVersion),
+               let result = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)) {
+
+                let nameRange = Range(result.range(at: 1), in: trimmed)
+                let udidRange = Range(result.range(at: 2), in: trimmed)
+
+                if let nameRange, let udidRange {
+                    let name = String(trimmed[nameRange])
+                    let udid = String(trimmed[udidRange])
+
+                    // Mac devices don't have version in xctrace output
+                    let (platform, deviceType, osVersion) = classifyDevice(name: name, version: nil)
+
+                    let device = Device(
+                        id: udid,
+                        name: name,
+                        type: deviceType,
+                        platform: platform,
+                        state: .available,
+                        runtime: nil,
+                        osVersion: osVersion
+                    )
+                    devices.append(device)
                 }
             }
         }
 
-        return devices
+        // Sort by platform then name
+        return devices.sorted { lhs, rhs in
+            if lhs.platform != rhs.platform {
+                return lhs.platform.rawValue < rhs.platform.rawValue
+            }
+            return lhs.name < rhs.name
+        }
+    }
+
+    private func classifyDevice(name: String, version: String?) -> (platform: Device.Platform, deviceType: Device.DeviceType, osVersion: String?) {
+        let lowercased = name.lowercased()
+
+        // Mac devices (version may be nil as xctrace doesn't include it)
+        if lowercased.contains("my mac") || lowercased.contains("macbook") ||
+           lowercased.contains("imac") || lowercased.contains("mac mini") ||
+           lowercased.contains("mac pro") || lowercased.contains("mac studio") {
+            let osVersion = version.map { "macOS \($0)" }
+            return (.macOS, .mac, osVersion)
+        }
+
+        // Apple Watch devices
+        if lowercased.contains("watch") {
+            let osVersion = version.map { "watchOS \($0)" }
+            return (.watchOS, .physical, osVersion)
+        }
+
+        // Apple TV devices
+        if lowercased.contains("apple tv") || lowercased.contains("appletv") {
+            let osVersion = version.map { "tvOS \($0)" }
+            return (.tvOS, .physical, osVersion)
+        }
+
+        // Vision Pro devices
+        if lowercased.contains("vision") {
+            let osVersion = version.map { "visionOS \($0)" }
+            return (.visionOS, .physical, osVersion)
+        }
+
+        // Default to iOS (iPhone, iPad, iPod)
+        let osVersion = version.map { "iOS \($0)" }
+        return (.iOS, .physical, osVersion)
     }
 
     // MARK: - Combined Discovery

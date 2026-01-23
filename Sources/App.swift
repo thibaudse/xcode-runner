@@ -82,8 +82,8 @@ actor XcodeRunner {
             let scheme = try await selectScheme(from: project)
             print()
 
-            // Step 3: Select device
-            let device = try await selectDevice()
+            // Step 3: Select device (filtered by scheme's supported destinations)
+            let device = try await selectDevice(project: project, scheme: scheme)
             print()
 
             // Step 4: Build
@@ -225,15 +225,33 @@ actor XcodeRunner {
 
     // MARK: - Device Selection
 
-    private func selectDevice() async throws -> Device {
+    private func selectDevice(project: XcodeProject, scheme: String) async throws -> Device {
         print("📱 ".bold + "Finding devices...".bold)
 
-        let devices = try await deviceManager.discoverAllDevices()
+        // Discover supported destinations for the scheme
+        let destinations = ProjectManager().discoverDestinations(for: project, scheme: scheme)
+
+        let allDevices = try await deviceManager.discoverAllDevices()
+
+        // Filter devices to only those supported by the scheme
+        let devices = allDevices.filter { device in
+            destinations.supports(device.platform)
+        }
 
         if devices.isEmpty {
+            // If no devices match, fall back to all devices with a warning
+            if !allDevices.isEmpty {
+                print("   ⚠️  No devices found for scheme's supported platforms".yellow)
+                print("   Showing all available devices...".dim)
+                return try await selectDeviceFromList(allDevices)
+            }
             throw AppError.noDevicesFound
         }
 
+        return try await selectDeviceFromList(devices)
+    }
+
+    private func selectDeviceFromList(_ devices: [Device]) async throws -> Device {
         if let id = deviceId {
             if let device = devices.first(where: { $0.id == id }) {
                 print("   Using: \(device.displayName)".dim)
@@ -646,6 +664,12 @@ actor XcodeRunner {
         case .physical:
             try await appRunner.runOnPhysicalDeviceWithConsole(
                 device: device,
+                appPath: appPath,
+                bundleId: bundleId,
+                progress: progressHandler
+            )
+        case .mac:
+            try await appRunner.runOnMacWithConsole(
                 appPath: appPath,
                 bundleId: bundleId,
                 progress: progressHandler

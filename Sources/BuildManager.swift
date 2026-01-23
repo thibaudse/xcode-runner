@@ -109,13 +109,16 @@ actor BuildManager {
             arguments.append("-disableAutomaticPackageResolution")
         }
 
-        // Add destination based on device type
+        // Add destination based on device type and platform
         let destination: String
         switch config.device.type {
         case .simulator:
-            destination = "platform=iOS Simulator,id=\(config.device.id)"
+            destination = "platform=\(config.device.platform.simulatorPlatform),id=\(config.device.id)"
         case .physical:
-            destination = "platform=iOS,id=\(config.device.id)"
+            destination = "platform=\(config.device.platform.devicePlatform),id=\(config.device.id)"
+        case .mac:
+            // Mac uses "macOS" platform with the machine's identifier
+            destination = "platform=macOS,arch=\(getMacArchitecture())"
         }
         arguments += ["-destination", destination]
 
@@ -223,9 +226,17 @@ actor BuildManager {
 
         // Check all possible configuration/platform combinations
         let configurations = ["Debug", "Release"]
-        let platforms = ["iphoneos", "iphonesimulator"]
+        // Include all platform build directories
+        let platforms = [
+            "iphoneos", "iphonesimulator",           // iOS
+            "macosx",                                  // macOS
+            "watchos", "watchsimulator",             // watchOS
+            "appletvos", "appletvsimulator",         // tvOS
+            "xros", "xrsimulator"                     // visionOS
+        ]
 
         for config in configurations {
+            // First check platform-specific directories (e.g., Debug-iphoneos)
             for platform in platforms {
                 let productDir = "\(productsPath)/\(config)-\(platform)"
 
@@ -239,6 +250,27 @@ actor BuildManager {
                 if let contents = try? fm.contentsOfDirectory(atPath: productDir) {
                     for item in contents where item.hasSuffix(".app") {
                         return "\(productDir)/\(item)"
+                    }
+                }
+            }
+
+            // Also check configuration directory without platform suffix (Swift Package workspaces)
+            // e.g., Debug/ instead of Debug-macosx/
+            let configOnlyDir = "\(productsPath)/\(config)"
+
+            // Try exact scheme name match
+            let exactPath = "\(configOnlyDir)/\(scheme).app"
+            if fm.fileExists(atPath: exactPath) {
+                return exactPath
+            }
+
+            // Search for any .app in this directory
+            if let contents = try? fm.contentsOfDirectory(atPath: configOnlyDir) {
+                for item in contents where item.hasSuffix(".app") {
+                    let appPath = "\(configOnlyDir)/\(item)"
+                    var isDir: ObjCBool = false
+                    if fm.fileExists(atPath: appPath, isDirectory: &isDir), isDir.boolValue {
+                        return appPath
                     }
                 }
             }
@@ -452,6 +484,14 @@ actor BuildManager {
             return false
         }
         return true
+    }
+
+    private nonisolated func getMacArchitecture() -> String {
+        #if arch(arm64)
+        return "arm64"
+        #else
+        return "x86_64"
+        #endif
     }
 }
 

@@ -131,4 +131,107 @@ struct ProjectManager {
         SchemeCacheStore.shared.storeSchemes(schemes, for: cacheKey, signature: signature)
         return schemes
     }
+
+    // MARK: - Destinations
+
+    /// Supported destination platforms for a scheme
+    struct SchemeDestinations {
+        var supportsiOS: Bool = false
+        var supportsmacOS: Bool = false
+        var supportswatchOS: Bool = false
+        var supportstvOS: Bool = false
+        var supportsvisionOS: Bool = false
+
+        func supports(_ platform: Device.Platform) -> Bool {
+            switch platform {
+            case .iOS: return supportsiOS
+            case .macOS: return supportsmacOS
+            case .watchOS: return supportswatchOS
+            case .tvOS: return supportstvOS
+            case .visionOS: return supportsvisionOS
+            }
+        }
+    }
+
+    /// Discovers the supported destinations for a scheme
+    func discoverDestinations(for project: XcodeProject, scheme: String) -> SchemeDestinations {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcodebuild")
+        process.arguments = [
+            project.type.flag, project.path.path,
+            "-scheme", scheme,
+            "-showdestinations"
+        ]
+
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            // If we can't query destinations, allow all platforms
+            return SchemeDestinations(
+                supportsiOS: true,
+                supportsmacOS: true,
+                supportswatchOS: true,
+                supportstvOS: true,
+                supportsvisionOS: true
+            )
+        }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else {
+            return SchemeDestinations(
+                supportsiOS: true,
+                supportsmacOS: true,
+                supportswatchOS: true,
+                supportstvOS: true,
+                supportsvisionOS: true
+            )
+        }
+
+        // Parse output to determine supported platforms
+        // Format: { platform:iOS Simulator, id:..., OS:17.0, name:iPhone 15 }
+        //         { platform:macOS, arch:arm64 }
+        //         { platform:iOS, id:..., name:... }
+        var destinations = SchemeDestinations()
+
+        let lowercased = output.lowercased()
+
+        // Check for iOS support (including Mac Catalyst)
+        if lowercased.contains("platform:ios") ||
+           lowercased.contains("platform:ios simulator") ||
+           lowercased.contains("platform:mac catalyst") {
+            destinations.supportsiOS = true
+        }
+
+        // Check for macOS support
+        if lowercased.contains("platform:macos") ||
+           lowercased.contains("platform:mac catalyst") {
+            destinations.supportsmacOS = true
+        }
+
+        // Check for watchOS support
+        if lowercased.contains("platform:watchos") ||
+           lowercased.contains("platform:watchos simulator") {
+            destinations.supportswatchOS = true
+        }
+
+        // Check for tvOS support
+        if lowercased.contains("platform:tvos") ||
+           lowercased.contains("platform:tvos simulator") {
+            destinations.supportstvOS = true
+        }
+
+        // Check for visionOS support
+        if lowercased.contains("platform:visionos") ||
+           lowercased.contains("platform:visionos simulator") ||
+           lowercased.contains("platform:xros") {
+            destinations.supportsvisionOS = true
+        }
+
+        return destinations
+    }
 }
